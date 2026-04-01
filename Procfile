@@ -1,1 +1,1 @@
-web: gunicorn core.wsgi:application --bind 0.0.0.0:$PORT
+python manage.py migrate && python manage.py collectstatic --noinput && gunicorn mon_projet.wsgi:application --bind 0.0.0.0:$PORT
