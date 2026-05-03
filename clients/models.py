@@ -1,6 +1,8 @@
 from django.db import models
 from django.core.validators import MinValueValidator
 from decimal import Decimal
+from django.utils import timezone
+from datetime import timedelta
 
 class Customer(models.Model):
     GENDER_CHOICES = (
@@ -35,6 +37,19 @@ class Customer(models.Model):
 
     def __str__(self):
         return f"{self.first_name} {self.last_name} ({self.email})"
+    
+    @property
+    def is_active(self):
+        # Un client est considéré actif s'il a passé une commande dans les 60 derniers jours
+        last_order = self.orders.order_by('-created_at').first()
+        if not last_order:
+            return False
+        return last_order.created_at > timezone.now() - timedelta(days=60)
+
+    @property
+    def last_purchase_date(self):
+        last_order = self.orders.order_by('-created_at').first()
+        return last_order.created_at if last_order else None
 
     @property
     def age(self):

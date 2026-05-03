@@ -1,25 +1,25 @@
 from rest_framework import serializers
 from .models import Product
-from django.db.models import Sum
 
 class ProductSerializer(serializers.ModelSerializer):
-    total_sales = serializers.SerializerMethodField()
-    total_revenue = serializers.SerializerMethodField()
+    # Les valeurs sont récupérées directement depuis les annotations du queryset
+    total_sales = serializers.IntegerField(read_only=True)
+    total_revenue = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        read_only=True
+    )
 
     class Meta:
         model = Product
         fields = [
-            'id', 'name', 'description', 'category', 
-            'price', 'is_active', 'total_sales', 
-            'total_revenue', 'created_at'
+            'id', 
+            'name', 
+            'description', 
+            'category', 
+            'price', 
+            'is_active', 
+            'total_sales', 
+            'total_revenue', 
+            'created_at'
         ]
-
-    def get_total_sales(self, obj):
-        # On calcule le nombre total d'unités vendues pour ce produit
-        from sales.models import OrderItem
-        return OrderItem.objects.filter(product=obj).aggregate(Sum('quantity'))['quantity__sum'] or 0
-
-    def get_total_revenue(self, obj):
-        # On calcule le revenu total généré par ce produit
-        from sales.models import OrderItem
-        return OrderItem.objects.filter(product=obj).aggregate(Sum('subtotal'))['subtotal__sum'] or 0

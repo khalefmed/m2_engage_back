@@ -6,6 +6,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     age = serializers.ReadOnlyField()
     total_spent = serializers.SerializerMethodField()
     total_orders = serializers.SerializerMethodField()
+    is_active = serializers.ReadOnlyField()
+    last_purchase_date = serializers.ReadOnlyField()
 
     class Meta:
         model = Customer
@@ -13,7 +15,7 @@ class CustomerSerializer(serializers.ModelSerializer):
             'id', 'first_name', 'last_name', 'email', 'phone', 
             'gender', 'date_of_birth', 'age', 'profession',
             'country', 'city', 'address', 'latitude', 'longitude',
-            'total_spent', 'total_orders', 'created_at'
+            'total_spent', 'total_orders', 'created_at', 'last_purchase_date', 'is_active'
         ]
 
     def get_total_spent(self, obj):

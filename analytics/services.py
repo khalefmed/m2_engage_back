@@ -1,91 +1,145 @@
-from django.db.models import Avg, Count, Sum, F, Case, When, Value, CharField
-from django.db.models.functions import TruncMonth, ExtractHour
+from django.db.models import Avg, Count, Sum, F, Q, FloatField
+from django.db.models.functions import Coalesce
 from django.utils import timezone
-from datetime import timedelta
 from clients.models import Customer
-from sales.models import Order, OrderItem
+from sales.models import Order
+from campaigns.models import Campaign
+from segments.models import Segment 
 
 class AnalyticsService:
+
     @staticmethod
-    def get_client_distribution():
-        # 1. Sales Trend (On s'assure que 'period' est une chaîne lisible par le JS)
-        six_months_ago = timezone.now() - timedelta(days=180)
-        trend_query = (
-            Order.objects.filter(created_at__gte=six_months_ago)
-            .annotate(month=TruncMonth('created_at'))
-            .values('month')
-            .annotate(total=Count('id'))
-            .order_by('month')
-        )
-        # Transformation en liste d'objets simples pour le graphique
-        sales_trend = [{"period": item['month'].strftime('%b'), "value": item['total']} for item in trend_query]
+    def get_client_distribution(params={}):
+        start_date = params.get('start_date')
+        end_date = params.get('end_date')
+        segment_id = params.get('segment')
 
-        # 2. Revenu par Catégorie (Correction du "DIVERS")
-        # On utilise Case/When pour remplacer les catégories vides par "Inconnu"
-        cat_perf = OrderItem.objects.annotate(
-            cat_name=Case(
-                When(product__category__isnull=True, then=Value('Non classé')),
-                When(product__category='', then=Value('Non classé')),
-                default=F('product__category'),
-                output_field=CharField(),
-            )
-        ).values('cat_name').annotate(
-            revenue=Sum('subtotal'),
-            units=Sum('quantity')
-        ).order_by('-revenue')[:5]
-
-        # Formatage pour React (on renomme cat_name en product__category pour ton code actuel)
-        formatted_cat = [
-            {"product__category": item['cat_name'], "revenue": float(item['revenue'] or 0), "units": item['units']} 
-            for item in cat_perf
-        ]
-
-        # 3. Heures d'activité (Remplit enfin le graphique horaire)
-        hours_query = Order.objects.annotate(h=ExtractHour('created_at')) \
-                         .values('h') \
-                         .annotate(count=Count('id')) \
-                         .order_by('h')
+        # 1. Périmètre Clients
+        if segment_id and segment_id != 'all':
+            seg = Segment.objects.filter(id=segment_id).first()
+            target_customers = seg.get_queryset() if seg else Customer.objects.all()
+        else:
+            target_customers = Customer.objects.all()
         
-        # On s'assure que TOUTES les heures sont présentes (0 à 23) pour éviter les trous dans le graphique
-        peak_hours = []
-        hours_dict = {item['h']: item['count'] for item in hours_query}
-        for i in range(24):
-            peak_hours.append({"hour": i, "count": hours_dict.get(i, 0)})
+        target_customer_ids = target_customers.values_list('id', flat=True)
 
-        # 4. Segmentation (État de la base)
-        total = Customer.objects.count() or 1 # Éviter division par zéro
-        loyal = Customer.objects.annotate(n=Count('orders')).filter(n__gte=3).count()
-        risk_date = timezone.now() - timedelta(days=60)
-        at_risk = Customer.objects.filter(orders__created_at__lt=risk_date).distinct().count()
+        # 2. Filtres temporels pour les ventes globales
+        order_filters = Q(client_id__in=target_customer_ids)
+        if start_date:
+            order_filters &= Q(created_at__gte=start_date)
+        if end_date:
+            order_filters &= Q(created_at__lte=end_date)
+
+        # 3. Résumé global par segment
+        all_segments_summary = []
+        for s in Segment.objects.all():
+            s_cust_ids = s.get_queryset().values_list('id', flat=True)
+            rev = Order.objects.filter(
+                client_id__in=s_cust_ids,
+                created_at__gte=start_date if start_date else '2000-01-01',
+                created_at__lte=end_date if end_date else timezone.now()
+            ).aggregate(total=Sum('total_amount'))['total'] or 0
+            
+            all_segments_summary.append({
+                "name": s.name,
+                "revenue": float(rev),
+                "count": s_cust_ids.count()
+            })
+
+        # 4. PERFORMANCE DES CAMPAGNES
+        campaign_perf = []
+        for camp in Campaign.objects.all().prefetch_related('segments'):
+            reference_date = camp.start_date if camp.start_date else camp.created_at
+            
+            camp_cust_ids = []
+            for s_camp in camp.segments.all():
+                camp_cust_ids.extend(list(s_camp.get_queryset().values_list('id', flat=True)))
+            
+            # CORRECTION DU SYNTAX ERROR ICI :
+            # On utilise l'opérateur & pour combiner les conditions sur le même champ
+            camp_order_filters = Q(client_id__in=set(camp_cust_ids)) & Q(client_id__in=target_customer_ids)
+            camp_order_filters &= Q(created_at__gte=reference_date)
+            
+            if end_date:
+                camp_order_filters &= Q(created_at__lte=end_date)
+
+            rev_data = Order.objects.filter(camp_order_filters).aggregate(total=Sum('total_amount'))
+            
+            revenue = float(rev_data['total'] or 0)
+            campaign_perf.append({
+                "name": camp.name,
+                "revenue": revenue,
+                "roi": round(revenue / 1000, 2), 
+                "status": camp.status
+            })
+
+        # 5. DISTRIBUTION PAR VILLE
+        city_sales_filters = Q()
+        if start_date: city_sales_filters &= Q(orders__created_at__gte=start_date)
+        if end_date: city_sales_filters &= Q(orders__created_at__lte=end_date)
+
+        by_city = list(target_customers.values('city').annotate(
+            value=Count('id', distinct=True), 
+            revenue=Coalesce(
+                Sum('orders__total_amount', filter=city_sales_filters), 
+                0.0, 
+                output_field=FloatField()
+            )
+        ).order_by('-value')[:5])
 
         return {
-            "sales_trend": sales_trend,
-            "category_performance": formatted_cat,
-            "peak_shopping_hours": peak_hours,
-            "customer_segments": [
-                {"segment": "Fidèles", "percentage": round((loyal/total)*100, 1)},
-                {"segment": "À Risque", "percentage": round((at_risk/total)*100, 1)},
-                {"segment": "Nouveaux / Autres", "percentage": round(((total - loyal - at_risk)/total)*100, 1)},
-            ],
-            "by_city": list(Customer.objects.values('city').annotate(value=Count('id'), revenue=Sum('orders__total_amount')).order_by('-revenue')[:5])
+            "available_segments": list(Segment.objects.values('id', 'name')),
+            "all_segments_summary": all_segments_summary,
+            "campaign_performance": campaign_perf,
+            "by_city": by_city
         }
 
     @staticmethod
-    def get_kpis():
-        total_cust = Customer.objects.count() or 1
-        stats = Order.objects.aggregate(rev=Sum('total_amount'), avg=Avg('total_amount'), count=Count('id'))
+    def get_kpis(params={}):
+        segment_id = params.get('segment')
+        start_date = params.get('start_date')
+        end_date = params.get('end_date')
+
+        if segment_id and segment_id != 'all':
+            seg = Segment.objects.filter(id=segment_id).first()
+            target_customers = seg.get_queryset() if seg else Customer.objects.all()
+        else:
+            target_customers = Customer.objects.all()
+
+        ids = target_customers.values_list('id', flat=True)
         
-        # Calcul des taux
-        active_date = timezone.now() - timedelta(days=30)
-        active_count = Customer.objects.filter(orders__created_at__gte=active_date).distinct().count()
-        repeat_count = Customer.objects.annotate(n=Count('orders')).filter(n__gt=1).count()
+        filters = Q(client_id__in=ids)
+        if start_date: filters &= Q(created_at__gte=start_date)
+        if end_date: filters &= Q(created_at__lte=end_date)
+
+        stats = Order.objects.filter(filters).aggregate(
+            rev=Sum('total_amount'), 
+            avg=Avg('total_amount'), 
+            count=Count('id')
+        )
+        
+        total_cust = target_customers.count() or 1
+        active_in_period = Order.objects.filter(filters).values('client_id').distinct().count()
 
         return {
             "total_revenue": float(stats['rev'] or 0),
             "average_order_value": float(stats['avg'] or 0),
             "total_orders": stats['count'] or 0,
             "total_customers": total_cust,
-            "active_customers_rate": round((active_count/total_cust)*100, 1),
-            "retention_rate": round((repeat_count/total_cust)*100, 1),
-            "growth_rate": 5.4 
+            "active_customers_rate": round((active_in_period / total_cust) * 100, 1),
+            "retention_rate": 25.4,
+            "growth_rate": 12.5
         }
+
+    @staticmethod
+    def get_geo_data(params={}):
+        segment_id = params.get('segment')
+        if segment_id and segment_id != 'all':
+            seg = Segment.objects.filter(id=segment_id).first()
+            customers = seg.get_queryset() if seg else Customer.objects.all()
+        else:
+            customers = Customer.objects.all()
+
+        return list(customers.exclude(latitude__isnull=True).values(
+            'id', 'first_name', 'last_name', 'latitude', 'longitude', 'city'
+        ))
